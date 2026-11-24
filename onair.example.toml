@@ -1,0 +1,54 @@
+# On-air sign bridge: example config. Copy to onair.toml and edit.
+# Every number below is a PLACEHOLDER until you have run:  python3 onair_bridge.py learn --port "<desk>"
+
+[midi]
+port = "desk"              # any part of the MIDI input name (see: onair_bridge.py list)
+
+[relay]
+port = "auto"              # finds the CP210x serial port; or e.g. "/dev/cu.SLAB_USBtoUART" / "COM5"
+refresh_seconds = 30       # re-send the wanted state this often, in case the unit hiccups
+
+[safety]
+# What a sign does while the bridge has not yet heard from the desk (start-up, or MIDI unplugged).
+#   "idle" = stay dark until a mic is heard to be live    "live" = stay lit until the desk has reported each mic
+# With "idle", a fader already up when the bridge starts does not light the sign until it is moved (or mute is pressed).
+unknown_as = "idle"
+# What the relays do when the bridge is stopped normally: "off", "on", or "leave" as they are.
+on_exit = "off"
+
+# ---- microphones -------------------------------------------------------------------------------
+# fader / mute: { type = "cc" | "note" | "pitchbend", channel = 1-16, number = N }  (pitchbend has no number)
+# A mic is live when its fader is open AND it is not muted. Give it a fader, a mute, or both.
+# open_above / close_below are fractions of fader travel (0.0 to 1.0). Open at 8%, close again below 4%.
+
+[[mic]]
+name = "Presenter"
+fader = { type = "cc", channel = 1, number = 1 }
+open_above = 0.08
+close_below = 0.04
+# Optional mute button. mode "state": the desk sends a value (127 = muted, or the reverse via high_means).
+#                       mode "toggle": every press flips it (can drift out of step if the desk is also muted by other means).
+mute = { type = "cc", channel = 1, number = 9, mode = "state", high_means = "muted" }
+
+[[mic]]
+name = "Guest 1"
+fader = { type = "cc", channel = 1, number = 2 }
+
+[[mic]]
+name = "Guest 2"
+fader = { type = "cc", channel = 1, number = 3 }
+
+# ---- signs -------------------------------------------------------------------------------------
+# A sign is on while ANY of its mics is live. Several mics can feed one sign; one mic can feed several signs.
+
+[[sign]]
+name = "Studio door"
+relay = 1                  # 1-4, the relay's CH number
+mics = ["Presenter", "Guest 1", "Guest 2"]
+off_delay = 1.5            # seconds the sign stays lit after the last mic goes quiet (stops flicker, saves the relay)
+on_delay = 0.0
+
+[[sign]]
+name = "Presenter only"
+relay = 2
+mics = ["Presenter"]

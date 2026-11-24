@@ -1,0 +1,7 @@
+__pycache__/
+buildenv/
+venv/
+build/
+dist/
+*.spec
+onair.toml
