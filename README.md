@@ -20,6 +20,8 @@ One small Python script on the studio computer: listens to the desk's MIDI, deci
 
 **Runs in the background.** Minimise or the X button hides the window to a **tray icon** (bottom right, maybe under the ^ arrow) and the signs keep working. The icon is red when ON AIR, green when the signs are off, grey when stopped. Click it to reopen; right-click for "Start with Windows" and "Quit". Only Quit (tray menu or the Quit button) stops the signs. Ticking "Start automatically when Windows starts" (Setup step 4, or the tray menu) makes it launch at login straight into the tray and start working. It starts when the user logs in, not before, so set the studio PC to log in automatically.
 
+**Keeps itself going.** While it runs, Windows is stopped from sleeping (the screen can still switch off), because a sleeping PC drops the desk and relay connections. If the PC does sleep or freeze, the bridge notices when it wakes, reconnects the desk and relay, and the signs stay off until a mic is heard to be live. If the desk or relay is unplugged it keeps retrying every 2 seconds and carries on when they return; a missing relay is logged once, then a reminder each minute. If the bridge ever stops unexpectedly it restarts itself after 3 seconds.
+
 **Good to know.** Only one copy can run. Settings are in `%APPDATA%\OnAirBridge\onair.toml` and a log is beside it in `onair.log`. Windows lets only one program hold the desk's MIDI port, so the window pauses the bridge while you learn or test, then resumes. The window was tested here on Linux with simulated MIDI, a fake relay and a fake tray; the Windows build, the real tray icon, the minimise button, the Windows start-up entry and the real desk and relay are untested until you run them.
 
 # Command-line version (advanced)

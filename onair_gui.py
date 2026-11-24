@@ -24,9 +24,10 @@ import onair_bridge as ob
 
 try:  # tray icon; the window still works without them
     import pystray
-    from PIL import Image, ImageDraw
+    import onair_icon
 except Exception:  # pragma: no cover
     pystray = None
+    onair_icon = None
 
 APP_NAME = "OnAirBridge"
 LOCK_PORT = 47653  # a second copy would fight the first one for the relay's COM port
@@ -84,10 +85,29 @@ def set_autostart(on: bool) -> None:
                 pass
 
 
+TRAY_COLOURS = {RED: "#e53935", GREEN: "#43a047", GREY: "#8a8a93"}
+
+
 def make_icon(color: str, size: int = 64):
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    ImageDraw.Draw(img).ellipse((4, 4, size - 4, size - 4), fill=color, outline="white", width=4)
-    return img
+    """The app icon (dark tile, glowing dot, signal arcs) with the dot in the state's colour."""
+    return onair_icon.draw_logo(size, TRAY_COLOURS.get(color, color))
+
+
+# --------------------------------------------------------------------------- keep Windows awake while on air
+
+
+def keep_awake(on: bool) -> None:
+    """A sleeping PC drops the desk's MIDI and the relay's USB, so the signs would stop working.
+    Stops the PC sleeping while the bridge runs (the screen may still turn off). Call from the Tk thread."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if on else 0))
+    except Exception:
+        pass
 
 
 class QueueLogHandler(logging.Handler):
@@ -119,12 +139,14 @@ class App:
         self._told_about_tray = False
         self._setup_logging()
 
-        root.title("On-Air Sign Bridge")
+        root.title(f"On-Air Sign Bridge  v{ob.__version__}")
+        self._set_window_icon()
         root.geometry("840x820")
         root.minsize(760, 720)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.bind("<Unmap>", self._on_unmap)
         self._build()
+        ob.log.info("On-Air Sign Bridge v%s started", ob.__version__)
         self._start_tray()
         self.refresh_midi_list()
         self.load_into_widgets()
@@ -144,6 +166,18 @@ class App:
             except Exception as e:
                 messagebox.showwarning("Settings", f"Could not read {self.cfg_path}:\n{e}\n\nStarting with empty settings.")
         return ob.AppConfig()
+
+    def _set_window_icon(self) -> None:
+        if onair_icon is None:
+            return
+        try:
+            import base64
+
+            png = base64.b64encode(onair_icon.png_bytes(64, onair_icon.RED))
+            self._icon_img = tk.PhotoImage(data=png)  # keep a reference or Tk drops it
+            self.root.iconphoto(True, self._icon_img)
+        except Exception:
+            pass
 
     def _setup_logging(self) -> None:
         fmt = logging.Formatter("%(asctime)s  %(message)s", "%H:%M:%S")
@@ -333,18 +367,24 @@ class App:
         self.stop_evt = threading.Event()
         self.thread = threading.Thread(target=self._run, args=(self.bridge, self.stop_evt), daemon=True)
         self.thread.start()
+        keep_awake(True)
 
     def _run(self, bridge, stop) -> None:
-        try:
-            bridge.run(stop)
-        except Exception as e:  # keep the window alive and say why
-            ob.log.error("bridge crashed: %s", e)
+        """Run the bridge; if it ever dies unexpectedly, say why and start it again rather than leave the signs dead."""
+        while not stop.is_set():
+            try:
+                bridge.run(stop)
+                return
+            except Exception:
+                ob.log.exception("bridge stopped unexpectedly; restarting in 3 s")
+                stop.wait(3)
 
     def stop_bridge(self) -> None:
         if self.thread and self.stop_evt:
             self.stop_evt.set()
             self.thread.join(timeout=5)
         self.thread = self.stop_evt = self.bridge = None
+        keep_awake(False)
 
     def running(self) -> bool:
         return bool(self.thread and self.thread.is_alive())
@@ -563,6 +603,15 @@ class App:
         self.logq.put(text)
 
     def tick(self) -> None:
+        """Refresh the window four times a second. One odd moment must not freeze it, so always book the next one."""
+        try:
+            self._tick_body()
+        except Exception:
+            ob.log.exception("window update failed (carrying on)")
+        if not self._closing:
+            self.root.after(250, self.tick)
+
+    def _tick_body(self) -> None:
         while True:
             try:
                 line = self.logq.get_nowait()
@@ -570,6 +619,8 @@ class App:
                 break
             self.log_text.configure(state="normal")
             self.log_text.insert("end", line + "\n")
+            if int(self.log_text.index("end-1c").split(".")[0]) > 1500:
+                self.log_text.delete("1.0", "500.0")  # keep the window light; the full log is in onair.log
             self.log_text.see("end")
             self.log_text.configure(state="disabled")
         while True:
@@ -604,12 +655,11 @@ class App:
             self.start_btn.state(["disabled"])
             self.stop_btn.state(["!disabled"])
         self._n += 1
-        if self._n % 12 == 1:
+        if self._n % 40 == 1 and self.root.state() != "withdrawn":  # listing COM ports is slow-ish; skip when hidden
             try:
                 self.relay_info.configure(text=f"Found on {ob.find_serial_port()}")
             except Exception:
                 self.relay_info.configure(text="Not found. Plug it in (driver help ->)")
-        self.root.after(250, self.tick)
 
     # -- tray and background running
     def ui(self, fn) -> None:
@@ -718,6 +768,10 @@ def main() -> None:
     args = ap.parse_args()
     lock = acquire_single_instance()
     root = tk.Tk()
+    # The packaged app has no console, so anything unexpected goes to onair.log instead of vanishing.
+    root.report_callback_exception = lambda et, ev, tb: ob.log.error("window error", exc_info=(et, ev, tb))
+    threading.excepthook = lambda a: ob.log.error("thread error", exc_info=(a.exc_type, a.exc_value, a.exc_traceback))
+
     if lock is None:
         root.withdraw()
         messagebox.showinfo("On-Air Sign Bridge", "It is already running. Look for it on the taskbar.")
