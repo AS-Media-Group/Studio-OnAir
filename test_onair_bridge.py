@@ -150,6 +150,56 @@ class BridgeTests(unittest.TestCase):
         self.assertFalse(t.is_alive()); self.assertEqual(b.relay.sent[1], False)  # off on exit
 
 
+    def _bridge(self):
+        cfg = {"midi": {"port": "x"}, "relay": {}, "safety": {"on_exit": "off"},
+               "mic": [{"name": "A", "fader": {"type": "cc", "channel": 1, "number": 1}}],
+               "sign": [{"name": "S", "relay": 1, "mics": ["A"], "off_delay": 0}]}
+        b = ob.Bridge(cfg, dry_run=True)
+        b.midi = types_ns(connected=True, lost=False, poll=lambda: None, close=lambda: None)
+        return b
+
+    def test_one_odd_error_does_not_stop_the_signs(self):
+        import threading, time as _t
+        b = self._bridge()
+        real, calls = b.engine.update, {"n": 0}
+
+        def flaky(now):
+            calls["n"] += 1
+            if calls["n"] == 3:
+                raise RuntimeError("boom")
+            return real(now)
+
+        b.engine.update = flaky
+        stop = threading.Event()
+        t = threading.Thread(target=b.run, args=(stop,)); t.start()
+        _t.sleep(0.2)
+        b.q.put(types_ns(type="control_change", channel=0, control=1, value=100))
+        _t.sleep(1.2)  # long enough to get past the error and its 0.5 s pause
+        self.assertTrue(t.is_alive())
+        self.assertTrue(b.snapshot["signs"][0]["on"])
+        stop.set(); t.join(2)
+
+    def test_waking_from_sleep_forgets_the_desk(self):
+        import threading, time as _t
+        from unittest import mock
+        b = self._bridge()
+        closed = []
+        b.midi.close = lambda: closed.append(1)
+        b.q.put(types_ns(type="control_change", channel=0, control=1, value=100))
+        real_time = _t.time
+        jump = {"on": False}
+        with mock.patch.object(ob.time, "time", lambda: real_time() + (600 if jump["on"] else 0)):
+            stop = threading.Event()
+            t = threading.Thread(target=b.run, args=(stop,)); t.start()
+            _t.sleep(0.3)
+            self.assertTrue(b.snapshot["signs"][0]["on"])
+            jump["on"] = True  # the clock leaps 10 minutes: the PC was asleep
+            _t.sleep(0.4)
+            self.assertFalse(b.snapshot["signs"][0]["on"])  # fader position no longer trusted
+            self.assertTrue(closed)                           # desk port reopened from scratch
+            stop.set(); t.join(2)
+
+
 def types_ns(**kw):
     import types
     return types.SimpleNamespace(**kw)
@@ -270,6 +320,42 @@ class RelayTests(unittest.TestCase):
         f2 = FakeSerial(); r._open = lambda: setattr(r, "ser", f2)
         self.assertTrue(r.apply({1: True}))
         self.assertEqual(f2.written, ["AT+CH1=1"])     # re-sent although "unchanged" from the caller's view
+
+    def test_unplugged_relay_is_logged_once_not_every_retry(self):
+        f = FakeSerial(fail_after=0); r = self.relay(f)
+        with self.assertLogs("onair", level="INFO") as cm:
+            for _ in range(5):
+                self.assertFalse(r.apply({1: True}))
+            self.assertEqual(len([m for m in cm.output if "relay problem" in m]), 1)
+            r._open = lambda: setattr(r, "ser", FakeSerial())
+            self.assertTrue(r.apply({1: True}))
+            self.assertTrue(any("relay is back" in m for m in cm.output))
+
+
+class DriverCheckTests(unittest.TestCase):
+    def test_parse_pnp_status(self):
+        self.assertEqual(ob.parse_pnp_status(""), "absent")
+        self.assertEqual(ob.parse_pnp_status("OK\r\n"), "ok")
+        self.assertEqual(ob.parse_pnp_status("Error\r\n"), "no_driver")
+        self.assertEqual(ob.parse_pnp_status("Unknown"), "no_driver")
+        self.assertEqual(ob.parse_pnp_status("Error\nOK"), "ok")
+
+    def test_driver_check_never_raises_off_windows(self):
+        self.assertIn(ob.relay_driver_state(), ("unknown", "ok", "absent", "no_driver"))
+
+
+class IconTests(unittest.TestCase):
+    def test_icon_draws_and_ico_has_every_size(self):
+        import struct, tempfile, os
+        import onair_icon
+        for c in (onair_icon.RED, onair_icon.GREEN, onair_icon.GREY):
+            for size in (16, 32, 64):
+                self.assertEqual(onair_icon.draw_logo(size, c).size, (size, size))
+        path = os.path.join(tempfile.mkdtemp(), "t.ico")
+        onair_icon.write_ico(path)
+        data = open(path, "rb").read()
+        self.assertEqual(struct.unpack("<HHH", data[:6]), (0, 1, len(onair_icon.ICO_SIZES)))
+        self.assertTrue(data[6 + 16 * len(onair_icon.ICO_SIZES):].startswith(b"\x89PNG"))
 
 
 if __name__ == "__main__":

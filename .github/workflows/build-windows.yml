@@ -25,8 +25,9 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements.txt pyinstaller
       - run: python -m unittest -v
+      - run: python onair_icon.py onair.ico
       - run: >
-          pyinstaller --noconfirm --onefile --windowed --name OnAirBridge
+          pyinstaller --noconfirm --onefile --windowed --name OnAirBridge --icon onair.ico
           --hidden-import mido.backends.rtmidi --hidden-import rtmidi
           --hidden-import serial.tools.list_ports_windows --hidden-import pystray._win32
           onair_gui.py

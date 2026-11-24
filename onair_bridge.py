@@ -29,6 +29,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+__version__ = "0.2.0"
+
 log = logging.getLogger("onair")
 
 # --------------------------------------------------------------------------- MIDI backend
@@ -283,6 +285,31 @@ def find_serial_port() -> str:
                      f"(all ports: {everything}). Set [relay] port in the config.")
 
 
+def parse_pnp_status(output: str) -> str:
+    """Windows PnP status lines for the relay's USB chip -> 'ok' | 'no_driver' | 'absent'."""
+    lines = [l.strip().lower() for l in output.splitlines() if l.strip()]
+    if not lines:
+        return "absent"
+    return "ok" if "ok" in lines else "no_driver"
+
+
+def relay_driver_state() -> str:
+    """'ok' (chip present with a working driver), 'no_driver' (plugged in but Windows has no driver for it),
+    'absent' (not plugged in) or 'unknown' (not Windows, or the check could not run). Never raises."""
+    if sys.platform != "win32":
+        return "unknown"
+    import subprocess
+
+    ps = ("Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -like 'USB\\VID_10C4&PID_EA60*' } "
+          "| Select-Object -ExpandProperty Status")
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True,
+                             text=True, timeout=8, creationflags=0x08000000).stdout  # 0x08000000 = no console window
+        return parse_pnp_status(out)
+    except Exception:
+        return "unknown"
+
+
 class DryRunRelay:
     ok = True
 
@@ -307,6 +334,8 @@ class SerialRelay:
         self.sent: dict[int, bool] = {}
         self._last_refresh = 0.0
         self._retry_at = 0.0
+        self._down_since: float | None = None  # when the relay was first lost (None = fine)
+        self._last_warn = 0.0
 
     # -- low level
     def _open(self) -> None:
@@ -359,9 +388,19 @@ class SerialRelay:
                     self.sent[ch] = want
             if stale or force:
                 self._last_refresh = now
+            if self._down_since is not None:  # only now do we know the relay really answers again
+                log.info("relay is back after %.0f s", now - self._down_since)
+                self._down_since = None
             return True
         except Exception as e:  # serial.SerialException, RelayError, OSError
-            log.error("relay problem: %s (retrying every %.0fs)", e, self.retry)
+            # Say so once, then only a reminder a minute: a relay left unplugged must not fill the log.
+            if self._down_since is None:
+                self._down_since = now
+                self._last_warn = now
+                log.error("relay problem: %s (retrying every %.0f s)", e, self.retry)
+            elif now - self._last_warn >= 60:
+                self._last_warn = now
+                log.warning("relay still not reachable after %.0f s: %s", now - self._down_since, e)
             self.close()
             self.sent.clear()
             self._retry_at = now + self.retry
@@ -690,6 +729,7 @@ class Bridge:
         self.q: queue.Queue = queue.Queue()
         self.midi = MidiIn(cfg["midi"].get("port", ""), self.q)
         self.snapshot: dict = {"midi": False, "relay": False, "signs": []}
+        self._last_problem: tuple[str, float] = ("", 0.0)
 
     def _snap(self) -> None:
         self.snapshot = {
@@ -697,37 +737,60 @@ class Bridge:
             "signs": [{"name": s.name, "relay": s.relay, "on": s.state, "live": s.live_mics()}
                       for s in self.engine.signs]}
 
+    def _problem(self, what: str, err: Exception) -> None:
+        """Log a repeating problem once, then at most once a minute."""
+        now = time.monotonic()
+        key = f"{what}:{err}"
+        if key != self._last_problem[0] or now - self._last_problem[1] >= 60:
+            self._last_problem = (key, now)
+            log.error("%s: %s", what, err)
+
     def run(self, stop: threading.Event) -> None:
         engine, relay, midi = self.engine, self.relay, self.midi
         relay.apply(engine.prime(), force=True)  # known state from the first second
         shown: dict[int, bool] = {}
         log.info("running. unknown_as=%s on_exit=%s%s", self.cfg["safety"].get("unknown_as", "idle"),
                  self.on_exit, " (DRY RUN)" if self.dry_run else "")
+        last_wall = time.time()
         try:
             while not stop.is_set():
                 try:
-                    midi.poll()
-                except Exception as e:
-                    log.error("MIDI problem: %s", e)
-                if midi.lost:
-                    midi.lost = False
-                    engine.forget()  # fader positions are unknown until the desk speaks again
-                try:
-                    msg = self.q.get(timeout=0.05)
-                    while True:
-                        ev = event_from_mido(msg)
-                        if ev:
-                            engine.feed(ev)
-                        msg = self.q.get_nowait()
-                except queue.Empty:
-                    pass
-                relay.apply(engine.update(time.monotonic()))
-                for s in engine.signs:
-                    if shown.get(s.relay) != s.state:
-                        shown[s.relay] = s.state
-                        why = ", ".join(s.live_mics()) or ("waiting to hear from the desk" if s.state else "-")
-                        log.info("%s: %s  (live: %s)", s.name, "ON AIR" if s.state else "off", why)
-                self._snap()
+                    wall = time.time()
+                    if wall - last_wall > 15:
+                        # The loop normally turns every 50 ms. A gap this big means the PC slept (or froze): USB and
+                        # MIDI handles are not to be trusted afterwards, so start them afresh and wait to hear the desk.
+                        log.warning("PC paused for %.0f s (sleep?). Reconnecting the desk and relay.", wall - last_wall)
+                        midi.close()
+                        engine.forget()
+                        if isinstance(relay, SerialRelay):
+                            relay.close()
+                    last_wall = wall
+                    try:
+                        midi.poll()
+                    except Exception as e:
+                        self._problem("MIDI problem", e)
+                    if midi.lost:
+                        midi.lost = False
+                        engine.forget()  # fader positions are unknown until the desk speaks again
+                    try:
+                        msg = self.q.get(timeout=0.05)
+                        while True:
+                            ev = event_from_mido(msg)
+                            if ev:
+                                engine.feed(ev)
+                            msg = self.q.get_nowait()
+                    except queue.Empty:
+                        pass
+                    relay.apply(engine.update(time.monotonic()))
+                    for s in engine.signs:
+                        if shown.get(s.relay) != s.state:
+                            shown[s.relay] = s.state
+                            why = ", ".join(s.live_mics()) or ("waiting to hear from the desk" if s.state else "-")
+                            log.info("%s: %s  (live: %s)", s.name, "ON AIR" if s.state else "off", why)
+                    self._snap()
+                except Exception as e:  # never let one odd moment stop the signs working
+                    self._problem("unexpected error (carrying on)", e)
+                    stop.wait(0.5)
         finally:
             if self.on_exit != "leave":
                 relay.apply({s.relay: self.on_exit == "on" for s in engine.signs}, force=True)

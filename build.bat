@@ -10,7 +10,8 @@ call buildenv\Scripts\activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt pyinstaller || (echo Install failed. & pause & exit /b 1)
 python -m unittest || (echo Tests failed, not building. & pause & exit /b 1)
-pyinstaller --noconfirm --onefile --windowed --name OnAirBridge --hidden-import mido.backends.rtmidi --hidden-import rtmidi --hidden-import serial.tools.list_ports_windows --hidden-import pystray._win32 onair_gui.py || (echo Build failed. & pause & exit /b 1)
+python onair_icon.py onair.ico || (echo Icon failed. & pause & exit /b 1)
+pyinstaller --noconfirm --onefile --windowed --name OnAirBridge --icon onair.ico --hidden-import mido.backends.rtmidi --hidden-import rtmidi --hidden-import serial.tools.list_ports_windows --hidden-import pystray._win32 onair_gui.py || (echo Build failed. & pause & exit /b 1)
 echo.
 echo Done: dist\OnAirBridge.exe  (copy that one file to the studio PC and double-click it)
 pause
