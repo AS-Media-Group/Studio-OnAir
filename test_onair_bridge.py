@@ -332,6 +332,18 @@ class RelayTests(unittest.TestCase):
             self.assertTrue(any("relay is back" in m for m in cm.output))
 
 
+class DriverCheckTests(unittest.TestCase):
+    def test_parse_pnp_status(self):
+        self.assertEqual(ob.parse_pnp_status(""), "absent")
+        self.assertEqual(ob.parse_pnp_status("OK\r\n"), "ok")
+        self.assertEqual(ob.parse_pnp_status("Error\r\n"), "no_driver")
+        self.assertEqual(ob.parse_pnp_status("Unknown"), "no_driver")
+        self.assertEqual(ob.parse_pnp_status("Error\nOK"), "ok")
+
+    def test_driver_check_never_raises_off_windows(self):
+        self.assertIn(ob.relay_driver_state(), ("unknown", "ok", "absent", "no_driver"))
+
+
 class IconTests(unittest.TestCase):
     def test_icon_draws_and_ico_has_every_size(self):
         import struct, tempfile, os

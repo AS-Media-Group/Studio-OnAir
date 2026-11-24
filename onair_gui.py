@@ -31,7 +31,8 @@ except Exception:  # pragma: no cover
 
 APP_NAME = "OnAirBridge"
 LOCK_PORT = 47653  # a second copy would fight the first one for the relay's COM port
-DRIVER_URL = "https://www.deshide.com/News-detail_CP210x_VCP_Drivers.html"
+DRIVER_URL = "https://www.silabs.com/developer-tools/usb-to-uart-bridge-vcp-drivers"  # the chip maker's own page
+DRIVER_URL_MAKER = "https://www.deshide.com/News-detail_CP210x_VCP_Drivers.html"  # the relay maker's page
 RED, GREY, GREEN, AMBER = "#d32f2f", "#9e9e9e", "#2e7d32", "#ef6c00"
 
 
@@ -237,7 +238,7 @@ class App:
         self.relay_info = ttk.Label(f, text="")
         self.relay_info.pack(side="left")
         ttk.Button(f, text="Test relays", command=self.test_relays).pack(side="right")
-        ttk.Button(f, text="Driver help", command=lambda: self._open(DRIVER_URL)).pack(side="right", padx=6)
+        ttk.Button(f, text="Driver help", command=self.driver_help).pack(side="right", padx=6)
 
         # 3 mics
         f = ttk.LabelFrame(t, text="3. Microphones (any live mic lights every sign)", padding=8)
@@ -655,11 +656,45 @@ class App:
             self.start_btn.state(["disabled"])
             self.stop_btn.state(["!disabled"])
         self._n += 1
-        if self._n % 40 == 1 and self.root.state() != "withdrawn":  # listing COM ports is slow-ish; skip when hidden
-            try:
-                self.relay_info.configure(text=f"Found on {ob.find_serial_port()}")
-            except Exception:
-                self.relay_info.configure(text="Not found. Plug it in (driver help ->)")
+        if self._n % 40 == 1 and self.root.state() != "withdrawn":  # checking is slow-ish; skip when hidden
+            threading.Thread(target=self._check_relay_port, daemon=True).start()
+
+    def _check_relay_port(self) -> None:
+        """Background thread: say where the relay is, or why it is not working (never touches Tk directly)."""
+        try:
+            text = f"Found on {ob.find_serial_port()}"
+        except Exception:
+            state = ob.relay_driver_state()
+            text = {"no_driver": "Plugged in, but Windows has no driver for it yet. Press Driver help ->",
+                    "absent": "Not found. Plug it in (USB).",
+                    }.get(state, "Not found. Plug it in, or press Driver help ->")
+        self.ui(lambda: self.relay_info.configure(text=text))
+
+    def driver_help(self) -> None:
+        win = tk.Toplevel(self.root)
+        win.title("Relay driver")
+        win.transient(self.root)
+        win.resizable(False, False)
+        ttk.Label(win, padding=(20, 16, 20, 8), wraplength=440, justify="left", text=(
+            "The relay needs a small USB driver (Silicon Labs CP210x). Windows 10 and 11 normally install it by "
+            "themselves a few seconds after you plug the relay in, if the PC is online.\n\n"
+            "If 'Relay' stays red or the relay says it is not found: unplug it, wait for Windows to finish, plug "
+            "it in again. If that does not work, download the driver below, unzip it, right-click the "
+            ".inf file (or run the installer inside) and choose Install. Then unplug and replug the relay.")).pack()
+        row = ttk.Frame(win, padding=(20, 4, 20, 16))
+        row.pack(fill="x")
+        for text, cmd in (("Download driver (Silicon Labs)", lambda: self._open(DRIVER_URL)),
+                          ("Relay maker's page (DSD TECH)", lambda: self._open(DRIVER_URL_MAKER)),
+                          ("Open Device Manager", self._device_manager)):
+            ttk.Button(row, text=text, command=cmd).pack(fill="x", pady=2)
+        ttk.Button(row, text="Close", command=win.destroy).pack(anchor="e", pady=(8, 0))
+
+    def _device_manager(self) -> None:
+        try:
+            os.startfile("devmgmt.msc")  # type: ignore[attr-defined]  # Windows only
+        except Exception:
+            messagebox.showinfo("Device Manager", "Open Device Manager from the Start menu, then look under "
+                                                  "'Ports (COM & LPT)' for 'Silicon Labs CP210x'.")
 
     # -- tray and background running
     def ui(self, fn) -> None:

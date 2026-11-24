@@ -285,6 +285,31 @@ def find_serial_port() -> str:
                      f"(all ports: {everything}). Set [relay] port in the config.")
 
 
+def parse_pnp_status(output: str) -> str:
+    """Windows PnP status lines for the relay's USB chip -> 'ok' | 'no_driver' | 'absent'."""
+    lines = [l.strip().lower() for l in output.splitlines() if l.strip()]
+    if not lines:
+        return "absent"
+    return "ok" if "ok" in lines else "no_driver"
+
+
+def relay_driver_state() -> str:
+    """'ok' (chip present with a working driver), 'no_driver' (plugged in but Windows has no driver for it),
+    'absent' (not plugged in) or 'unknown' (not Windows, or the check could not run). Never raises."""
+    if sys.platform != "win32":
+        return "unknown"
+    import subprocess
+
+    ps = ("Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -like 'USB\\VID_10C4&PID_EA60*' } "
+          "| Select-Object -ExpandProperty Status")
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True,
+                             text=True, timeout=8, creationflags=0x08000000).stdout  # 0x08000000 = no console window
+        return parse_pnp_status(out)
+    except Exception:
+        return "unknown"
+
+
 class DryRunRelay:
     ok = True
 
